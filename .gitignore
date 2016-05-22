@@ -1,0 +1,7 @@
+*.suo
+WindowBlindsClient/bin/*
+WindowBlindsClient/obj/*
+WindowBlindsClient/GlobalHook/Gma.UserActivityMonitor/bin/*
+WindowBlindsClient/GlobalHook/Gma.UserActivityMonitor/obj/*
+WindowBlindsClient/GlobalHook/Gma.UserActivityMonitorDemo/bin/*
+WindowBlindsClient/GlobalHook/Gma.UserActivityMonitorDemo/obj/*
