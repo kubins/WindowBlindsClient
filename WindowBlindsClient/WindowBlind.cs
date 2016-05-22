@@ -32,6 +32,8 @@ namespace WindowBlindsClient
     private Label labelName;
     private Label labelShortcutUpDown;
 
+    private bool bNextChangeIsWithoutNotification = false;
+
     private static Image[] arrImages =
         {
             WindowBlindsClient.Properties.Resources.blind_13,
@@ -63,8 +65,14 @@ namespace WindowBlindsClient
 
     public void SetValue(int nValue)
     {
+      SetValue(nValue, false);
+    }
+
+    public void SetValue(int nValue, bool bWithoutNotification)
+    {
       if (trackBar.Value != nValue)
       {
+        bNextChangeIsWithoutNotification = bWithoutNotification;
         trackBar.Value = nValue;
       }
     }
@@ -147,11 +155,15 @@ namespace WindowBlindsClient
       // nastavíme grafiku
       pictureBox.Image = arrImages[Math.Min((arrImages.Length * (int)trackBar.Value) / trackBar.Maximum, arrImages.Length - 1)];
 
-      if (OnWindowBlindChanged != null)
+      if (!bNextChangeIsWithoutNotification)
       {
-        // pokud někdo poslouchá, odešleme informaci o změně
-        OnWindowBlindChanged(this, (int)trackBar.Value);
+        if (OnWindowBlindChanged != null)
+        {
+          // pokud někdo poslouchá, odešleme informaci o změně
+          OnWindowBlindChanged(this, (int)trackBar.Value);
+        }
       }
+      bNextChangeIsWithoutNotification = false;
     }
   }
 }

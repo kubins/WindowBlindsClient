@@ -26,30 +26,55 @@ namespace WindowBlindsClient
 
     struct Blind
     {
-      public int nX;
-      public int nY;
-      public string strName;
-      public int nID;
-      public string strShortcutUp;
-      public string strShortcutDown;
+      public int m_nX;
+      public int m_nY;
+      public string m_strName;
+      public int m_nID;
+      public string m_strShortcutUp;
+      public string m_strShortcutDown;
 
       public void Clear()
       {
-        nX = -1;
-        nY = -1;
-        strName = "";
-        nID = -1;
-        strShortcutUp = "";
-        strShortcutDown = "";
+        m_nX = -1;
+        m_nY = -1;
+        m_strName = "";
+        m_nID = -1;
+        m_strShortcutUp = "";
+        m_strShortcutDown = "";
       }
     }
 
     struct Configuration
     {
-      public bool bAutoRun;
-      public bool bHideWhenMinimize;
-      public string strServerAddress;
-      public List<Blind> arrBlinds;
+      public bool m_bAutoRun;
+      public bool m_bHideWhenMinimize;
+      public string m_strServerAddress;
+      public List<Blind> m_arrBlinds;
+    }
+
+    public class Pair<F, S>
+    {
+      public Pair() { }
+      public Pair(F First, S Second)
+      {
+        m_First = First;
+        m_Second = Second;
+      }
+
+      public F m_First { get; set; }
+      public S m_Second { get; set; }
+    };
+
+    public class StateObject
+    {
+      // client socket
+      public Socket m_Socket = null;
+      // size of receive buffer
+      public const int m_nBufferSize = 256;
+      // receive buffer
+      public byte[] m_nBuffer = new byte[m_nBufferSize];
+      // received data string
+      public List<string> m_arrReceivedMessages;
     }
 
     private Configuration g_Configuration;
@@ -58,23 +83,9 @@ namespace WindowBlindsClient
     private List<Pair<String, int>> g_arrKeyCodes;
     private bool g_bShowBalloon = false;
     private IPEndPoint g_IPEndPoint;
-    private UdpClient g_UdpClient;
-
-    public class Pair<F, S>
-    {
-      public Pair()
-      {
-      }
-
-      public Pair(F First, S Second)
-      {
-        this.First = First;
-        this.Second = Second;
-      }
-
-      public F First { get; set; }
-      public S Second { get; set; }
-    };
+    private UdpClient g_UdpSocketForSending;
+    private Socket g_UdpSocketForReceiving;
+    private StateObject m_StateObjectForReceiving;
 
     public MainForm()
     {
@@ -90,7 +101,7 @@ namespace WindowBlindsClient
       HookManager.KeyUp += HookManager_KeyUp;
       // nastavení "po spuštění"
       RegistryKey RunAtStartupKey = Registry.CurrentUser.OpenSubKey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", true);
-      if (g_Configuration.bAutoRun)
+      if (g_Configuration.m_bAutoRun)
       {
         RunAtStartupKey.SetValue("WindowBlindsClient", Application.ExecutablePath.ToString());
       }
@@ -101,14 +112,85 @@ namespace WindowBlindsClient
       // nastavení komunikace se serverem
       try
       {
-        g_IPEndPoint = new IPEndPoint(IPAddress.Parse(g_Configuration.strServerAddress), 5674);
-        g_UdpClient = new UdpClient();
-        g_UdpClient.Connect(g_IPEndPoint);
+        g_IPEndPoint = new IPEndPoint(IPAddress.Parse(g_Configuration.m_strServerAddress), 5674);
+        g_UdpSocketForSending = new UdpClient();
+        g_UdpSocketForSending.Connect(g_IPEndPoint);
+        g_UdpSocketForReceiving = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        for(int nPortOffset = 0; nPortOffset < 10; nPortOffset++)
+        {
+          try
+          {
+            g_UdpSocketForReceiving.Bind(new IPEndPoint(IPAddress.Any, 5675 + nPortOffset));
+            break;
+          }
+          catch (Exception ex)
+          {
+            Console.WriteLine(ex.Message);
+          }
+        }
+        if (!g_UdpSocketForReceiving.IsBound)
+        {
+          throw new Exception("the socket cannot be bound");
+        }
+        m_StateObjectForReceiving = new StateObject();
+        m_StateObjectForReceiving.m_arrReceivedMessages = new List<string>();
+        m_StateObjectForReceiving.m_Socket = g_UdpSocketForReceiving;
+        g_UdpSocketForReceiving.BeginReceive(m_StateObjectForReceiving.m_nBuffer, 0, StateObject.m_nBufferSize, 0, new AsyncCallback(ReceiveCallback), m_StateObjectForReceiving);
+        // it registers the client to the server
+        Byte[] arrBytes = Encoding.ASCII.GetBytes("register;" + ((IPEndPoint)g_UdpSocketForReceiving.LocalEndPoint).Port.ToString() + "#");
+        g_UdpSocketForSending.Send(arrBytes, arrBytes.Length);
       }
       catch (Exception ex)
       {
         MessageBox.Show(ex.Message, "Configuration loading error", MessageBoxButtons.OK, MessageBoxIcon.Error);
       }
+    }
+
+    private void ReceiveCallback(IAsyncResult AsyncResult)
+    {
+      try
+      {
+        StateObject State = (StateObject)AsyncResult.AsyncState;
+        State.m_arrReceivedMessages.AddRange(Encoding.ASCII.GetString(State.m_nBuffer, 0, State.m_Socket.EndReceive(AsyncResult)).Split('#'));
+        State.m_Socket.BeginReceive(State.m_nBuffer, 0, StateObject.m_nBufferSize, 0, new AsyncCallback(ReceiveCallback), State);
+      }
+      catch (Exception ex)
+      {
+        Console.WriteLine(ex.Message);
+      }
+    }
+
+    private void timerRefresh_Tick(object sender, EventArgs e)
+    {
+      int nCount = m_StateObjectForReceiving.m_arrReceivedMessages.Count;
+      for(int nIndex = 0; nIndex < nCount; nIndex++)
+      {
+        try
+        {
+          string strMessage = m_StateObjectForReceiving.m_arrReceivedMessages[nIndex];
+          string[] arr_strMessageData = strMessage.Split(';');
+          if (arr_strMessageData.Length >= 1)
+          {
+            if (arr_strMessageData[0] == "blind_position")
+            {
+              if (arr_strMessageData.Length >= 3)
+              {
+                int nBlindIndex = int.Parse(arr_strMessageData[1]) - 1;
+                int nBlindPosition = 100 - int.Parse(arr_strMessageData[2]);
+                if(nBlindIndex >= 0 && nBlindIndex < g_arrWindowBlinds.Count)
+                {
+                  g_arrWindowBlinds[nBlindIndex].SetValue(nBlindPosition, true);
+                }
+              }
+            }
+          }
+        }
+        catch (Exception ex)
+        {
+          Console.WriteLine(ex.Message);
+        }
+      }
+      m_StateObjectForReceiving.m_arrReceivedMessages.RemoveRange(0, nCount);
     }
 
     private void LoadKeyCodes()
@@ -197,17 +279,17 @@ namespace WindowBlindsClient
               case Loading.Global:
                 if (strLine.IndexOf("AutoRun=") != -1)
                 {
-                  g_Configuration.bAutoRun = strLine.Substring(strLine.IndexOf("=") + 1) == "1";
+                  g_Configuration.m_bAutoRun = strLine.Substring(strLine.IndexOf("=") + 1) == "1";
                 }
                 if (strLine.IndexOf("HideWhenMinimize=") != -1)
                 {
-                  g_Configuration.bHideWhenMinimize = strLine.Substring(strLine.IndexOf("=") + 1) == "1";
+                  g_Configuration.m_bHideWhenMinimize = strLine.Substring(strLine.IndexOf("=") + 1) == "1";
                 }
                 break;
               case Loading.Connection:
                 if (strLine.IndexOf("ServerAddress=") != -1)
                 {
-                  g_Configuration.strServerAddress = strLine.Substring(strLine.IndexOf("=") + 1);
+                  g_Configuration.m_strServerAddress = strLine.Substring(strLine.IndexOf("=") + 1);
                 }
                 break;
               case Loading.Blinds:
@@ -215,7 +297,7 @@ namespace WindowBlindsClient
                 {
                   if (strLine.IndexOf("Count=") != -1)
                   {
-                    g_Configuration.arrBlinds = new List<Blind>(int.Parse(strLine.Substring(strLine.IndexOf("=") + 1)));
+                    g_Configuration.m_arrBlinds = new List<Blind>(int.Parse(strLine.Substring(strLine.IndexOf("=") + 1)));
                     nBlindIndexToLoading = 0;
                   }
                 }
@@ -225,7 +307,7 @@ namespace WindowBlindsClient
                   {
                     if (nBlindIndexToLoading > 0)
                     {
-                      g_Configuration.arrBlinds.Add(LoadingBlind);
+                      g_Configuration.m_arrBlinds.Add(LoadingBlind);
                     }
                     LoadingBlind.Clear();
                     nBlindIndexToLoading++;
@@ -233,24 +315,24 @@ namespace WindowBlindsClient
                   if (strLine.IndexOf("Position=") != -1)
                   {
                     List<string> arrPositions = strLine.Substring(strLine.IndexOf("=") + 1).Split(new string[] { "," }, StringSplitOptions.None).ToList();
-                    LoadingBlind.nX = int.Parse(arrPositions[0]);
-                    LoadingBlind.nY = int.Parse(arrPositions[1]);
+                    LoadingBlind.m_nX = int.Parse(arrPositions[0]);
+                    LoadingBlind.m_nY = int.Parse(arrPositions[1]);
                   }
                   if (strLine.IndexOf("Name=") != -1)
                   {
-                    LoadingBlind.strName = strLine.Substring(strLine.IndexOf("=") + 1);
+                    LoadingBlind.m_strName = strLine.Substring(strLine.IndexOf("=") + 1);
                   }
                   if (strLine.IndexOf("ID=") != -1)
                   {
-                    LoadingBlind.nID = int.Parse(strLine.Substring(strLine.IndexOf("=") + 1));
+                    LoadingBlind.m_nID = int.Parse(strLine.Substring(strLine.IndexOf("=") + 1));
                   }
                   if (strLine.IndexOf("ShortcutUp=") != -1)
                   {
-                    LoadingBlind.strShortcutUp = strLine.Substring(strLine.IndexOf("=") + 1);
+                    LoadingBlind.m_strShortcutUp = strLine.Substring(strLine.IndexOf("=") + 1);
                   }
                   if (strLine.IndexOf("ShortcutDown=") != -1)
                   {
-                    LoadingBlind.strShortcutDown = strLine.Substring(strLine.IndexOf("=") + 1);
+                    LoadingBlind.m_strShortcutDown = strLine.Substring(strLine.IndexOf("=") + 1);
                   }
                 }
                 break;
@@ -258,7 +340,7 @@ namespace WindowBlindsClient
           }
           if (nBlindIndexToLoading > 0)
           {
-            g_Configuration.arrBlinds.Add(LoadingBlind);
+            g_Configuration.m_arrBlinds.Add(LoadingBlind);
           }
         }
       }
@@ -270,31 +352,31 @@ namespace WindowBlindsClient
 
     private void LoadGraphics()
     {
-      g_arrWindowBlinds = new List<WindowBlind>(g_Configuration.arrBlinds.Count());
+      g_arrWindowBlinds = new List<WindowBlind>(g_Configuration.m_arrBlinds.Count());
       bool bCheckFirstPosition = true;
       Size WindowBlindSize = new Size(0, 0);
       Size WindowSize = new Size(0, 0);
-      foreach (Blind BlindItem in g_Configuration.arrBlinds)
+      foreach (Blind BlindItem in g_Configuration.m_arrBlinds)
       {
         Point Position = new Point(20, 20);
         if (bCheckFirstPosition)
         {
-          if (BlindItem.nX != 1 || BlindItem.nY != 1)
+          if (BlindItem.m_nX != 1 || BlindItem.m_nY != 1)
           {
             MessageBox.Show("The first blind configuraton must have position 1,1.", "Configuration loading error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             break;
           }
           bCheckFirstPosition = false;
           // vytvoříme grafiku
-          g_arrWindowBlinds.Add(new WindowBlind(this, Position, BlindItem.strName, BlindItem.strShortcutUp, BlindItem.strShortcutDown, ref WindowBlindSize));
+          g_arrWindowBlinds.Add(new WindowBlind(this, Position, BlindItem.m_strName, BlindItem.m_strShortcutUp, BlindItem.m_strShortcutDown, ref WindowBlindSize));
           WindowBlindSize += new Size(25, 5);
         }
         else
         {
           // vytvoříme grafiku
-          Position.X += (BlindItem.nX - 1) * WindowBlindSize.Width;
-          Position.Y += (BlindItem.nY - 1) * WindowBlindSize.Height;
-          g_arrWindowBlinds.Add(new WindowBlind(this, Position, BlindItem.strName, BlindItem.strShortcutUp, BlindItem.strShortcutDown));
+          Position.X += (BlindItem.m_nX - 1) * WindowBlindSize.Width;
+          Position.Y += (BlindItem.m_nY - 1) * WindowBlindSize.Height;
+          g_arrWindowBlinds.Add(new WindowBlind(this, Position, BlindItem.m_strName, BlindItem.m_strShortcutUp, BlindItem.m_strShortcutDown));
         }
         Size ActualWindowSize = new Size(Position.X + WindowBlindSize.Width + 5, Position.Y + WindowBlindSize.Height + 35);
         // nastavíme zachytávání událostí změny
@@ -330,7 +412,7 @@ namespace WindowBlindsClient
       int nBlindIndex = g_arrWindowBlinds.IndexOf((WindowBlind)Sender);
       if (nBlindIndex != -1)
       {
-        SendMovementRequest(g_Configuration.arrBlinds[nBlindIndex].nID, 100 - nValue);
+        SendMovementRequest(g_Configuration.m_arrBlinds[nBlindIndex].m_nID, 100 - nValue);
       }
     }
 
@@ -338,8 +420,8 @@ namespace WindowBlindsClient
     {
       try
       {
-        Byte[] arrBytes = Encoding.ASCII.GetBytes("set_blind;" + nID.ToString() + ";" + nValue.ToString());
-        g_UdpClient.Send(arrBytes, arrBytes.Length);
+        Byte[] arrBytes = Encoding.ASCII.GetBytes("set_blind;" + nID.ToString() + ";" + nValue.ToString() + ";" + ((IPEndPoint)g_UdpSocketForReceiving.LocalEndPoint).Port.ToString() + "#");
+        g_UdpSocketForSending.Send(arrBytes, arrBytes.Length);
       }
       catch (Exception ex)
       {
@@ -366,7 +448,7 @@ namespace WindowBlindsClient
     {
       if (bHide)
       {
-        if (g_Configuration.bHideWhenMinimize)
+        if (g_Configuration.m_bHideWhenMinimize)
         {
           notifyIcon.Visible = true;
           if (g_bShowBalloon)
@@ -390,7 +472,7 @@ namespace WindowBlindsClient
 
     private void MainForm_Shown(object sender, EventArgs e)
     {
-      if (g_Configuration.bAutoRun)
+      if (g_Configuration.m_bAutoRun)
       {
         g_bShowBalloon = true;
         WindowState = FormWindowState.Minimized;
@@ -413,11 +495,11 @@ namespace WindowBlindsClient
 
     private void ProcessShortcuts()
     {
-      for (int nBlindIndex = 0; nBlindIndex < g_Configuration.arrBlinds.Count; nBlindIndex++)
+      for (int nBlindIndex = 0; nBlindIndex < g_Configuration.m_arrBlinds.Count; nBlindIndex++)
       {
-        Blind BlindItem = g_Configuration.arrBlinds[nBlindIndex];
-        List<string> arrShortcutUp = BlindItem.strShortcutUp.Split(new string[] { "," }, StringSplitOptions.None).ToList();
-        List<string> arrShortcutDown = BlindItem.strShortcutDown.Split(new string[] { "," }, StringSplitOptions.None).ToList();
+        Blind BlindItem = g_Configuration.m_arrBlinds[nBlindIndex];
+        List<string> arrShortcutUp = BlindItem.m_strShortcutUp.Split(new string[] { "," }, StringSplitOptions.None).ToList();
+        List<string> arrShortcutDown = BlindItem.m_strShortcutDown.Split(new string[] { "," }, StringSplitOptions.None).ToList();
         bool bShortcutUp = arrShortcutUp.Count > 0;
         bool bShortcutDown = arrShortcutDown.Count > 0;
         foreach (string strKey in arrShortcutUp)
@@ -425,9 +507,9 @@ namespace WindowBlindsClient
           bool bFound = false;
           foreach (Pair<String, int> PairItem in g_arrKeyCodes)
           {
-            if (PairItem.First == strKey.ToUpper())
+            if (PairItem.m_First == strKey.ToUpper())
             {
-              if (g_arrKeys.IndexOf(PairItem.Second) != -1)
+              if (g_arrKeys.IndexOf(PairItem.m_Second) != -1)
               {
                 bFound = true;
                 break;
@@ -445,9 +527,9 @@ namespace WindowBlindsClient
           bool bFound = false;
           foreach (Pair<String, int> PairItem in g_arrKeyCodes)
           {
-            if (PairItem.First == strKey.ToUpper())
+            if (PairItem.m_First == strKey.ToUpper())
             {
-              if (g_arrKeys.IndexOf(PairItem.Second) != -1)
+              if (g_arrKeys.IndexOf(PairItem.m_Second) != -1)
               {
                 bFound = true;
                 break;
